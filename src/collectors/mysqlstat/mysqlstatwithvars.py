@@ -260,6 +260,8 @@ class MySQLCollector(diamond.collector.Collector):
                 "Which rows of '[SHOW GLOBAL STATUS](http://dev.mysql." +
                 "com/doc/refman/5.1/en/show-status.html)' you would " +
                 "like to publish. Leave unset to publish all",
+            'global_variables': 'Collect SHOW GLOBAL VARIABLES',
+            'global_variables_path': 'optional prefix for global variable metric names',
             'slave': 'Collect SHOW SLAVE STATUS',
             'master': 'Collect SHOW MASTER STATUS',
             'innodb': 'Collect SHOW ENGINE INNODB STATUS',
@@ -276,6 +278,8 @@ class MySQLCollector(diamond.collector.Collector):
         config = super(MySQLCollector, self).get_default_config()
         config.update({
             'path':     'mysql',
+            'global_variables_path':     '',
+
             # Connection settings
             'hosts':    [],
 
@@ -284,6 +288,7 @@ class MySQLCollector(diamond.collector.Collector):
             # Leave unset to publish all
             # 'publish': '',
 
+            'global_variables':    True,
             'slave':    False,
             'master':   False,
             'innodb':   False,
@@ -315,6 +320,9 @@ class MySQLCollector(diamond.collector.Collector):
     def get_db_global_status(self):
         return self.get_db_stats('SHOW GLOBAL STATUS')
 
+    def get_db_global_variables(self):
+        return self.get_db_stats('SHOW GLOBAL VARIABLES')
+
     def get_db_master_status(self):
         return self.get_db_stats('SHOW MASTER STATUS')
 
@@ -335,6 +343,27 @@ class MySQLCollector(diamond.collector.Collector):
             try:
                 metrics['status'][row['Variable_name']] = float(row['Value'])
             except:
+                pass
+
+        if self.config['global_variables']:
+            try:
+              rows = self.get_db_global_variables()
+              for row in rows:
+                  try:
+                      if self.config.has_key('global_variables_path') and self.config['global_variables_path']:
+                          vars_suffix = ".".join([ self.config['global_variables_path'], row['Variable_name'] ])
+                      else:
+                          vars_suffix = row['Variable_name']
+                      # self.log.debug("name: %s val: %s", vars_suffix, float(row['Value']))
+                      ## all variables are gauges, so treat them as such.
+                      self._GAUGE_KEYS.append(vars_suffix)
+                      metrics['status'][vars_suffix] = float(row['Value'])
+                  except:
+                      # self.log.debug('MySQLCollector: Skipping ' + vars_suffix + ": " +  row['Value'] )
+                      ## if we couldn't convert to float, skip it.
+                      pass
+            except:
+                self.log.error('MySQLCollector: Couldnt get global variables')
                 pass
 
         if self.config['master']:
@@ -426,6 +455,7 @@ class MySQLCollector(diamond.collector.Collector):
                 if type(metric_value) is not float:
                     continue
 
+## sighfuckreally?   and this uses a direct metricname too.  so can we append to the guage keys list programatically?
                 if metric_name not in self._GAUGE_KEYS:
                     metric_value = self.derivative(nickname + metric_name,
                                                    metric_value)
