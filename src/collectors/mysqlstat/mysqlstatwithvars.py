@@ -100,7 +100,9 @@ class MySQLCollector(diamond.collector.Collector):
         'Innodb_log_pending_checkpoint_writes', 'Innodb_log_pending_log_writes',
         'Innodb_row_queries_inside', 'Innodb_row_queries_queue',
         'Innodb_trx_history_list_length', 'Innodb_trx_total_lock_structs',
-        'Innodb_status_process_time', ]
+        'Innodb_status_process_time',
+        'Position',
+        ]
     _IGNORE_KEYS = [
         'Master_Port', 'Master_Server_Id',
         'Last_Errno', 'Last_IO_Errno', 'Last_SQL_Errno', ]
@@ -247,6 +249,8 @@ class MySQLCollector(diamond.collector.Collector):
             self.config['hosts'].append(hoststr)
 
         # Normalize some config vars
+        self.config['global_variables'] = str_to_bool(self.config['global_variables'])
+        self.config['extras'] = str_to_bool(self.config['extras'])
         self.config['master'] = str_to_bool(self.config['master'])
         self.config['slave'] = str_to_bool(self.config['slave'])
         self.config['innodb'] = str_to_bool(self.config['innodb'])
@@ -261,7 +265,6 @@ class MySQLCollector(diamond.collector.Collector):
                 "com/doc/refman/5.1/en/show-status.html)' you would " +
                 "like to publish. Leave unset to publish all",
             'global_variables': 'Collect SHOW GLOBAL VARIABLES',
-            'global_variables_path': 'optional prefix for global variable metric names',
             'slave': 'Collect SHOW SLAVE STATUS',
             'master': 'Collect SHOW MASTER STATUS',
             'innodb': 'Collect SHOW ENGINE INNODB STATUS',
@@ -278,8 +281,6 @@ class MySQLCollector(diamond.collector.Collector):
         config = super(MySQLCollector, self).get_default_config()
         config.update({
             'path':     'mysql',
-            'global_variables_path':     '',
-
             # Connection settings
             'hosts':    [],
 
@@ -289,6 +290,7 @@ class MySQLCollector(diamond.collector.Collector):
             # 'publish': '',
 
             'global_variables':    True,
+            'extras':    True,
             'slave':    False,
             'master':   False,
             'innodb':   False,
@@ -346,24 +348,22 @@ class MySQLCollector(diamond.collector.Collector):
                 pass
 
         if self.config['global_variables']:
+            metrics['variables'] = {}
             try:
               rows = self.get_db_global_variables()
               for row in rows:
                   try:
-                      if self.config.has_key('global_variables_path') and self.config['global_variables_path']:
-                          vars_suffix = ".".join([ self.config['global_variables_path'], row['Variable_name'] ])
-                      else:
-                          vars_suffix = row['Variable_name']
+                      vars_suffix = row['Variable_name']
                       # self.log.debug("name: %s val: %s", vars_suffix, float(row['Value']))
                       ## all variables are gauges, so treat them as such.
-                      self._GAUGE_KEYS.append(vars_suffix)
-                      metrics['status'][vars_suffix] = float(row['Value'])
+                      # self._GAUGE_KEYS.append(vars_suffix)
+                      metrics['variables'][vars_suffix] = float(row['Value'])
                   except:
-                      # self.log.debug('MySQLCollector: Skipping ' + vars_suffix + ": " +  row['Value'] )
+                      # self.log.debug("MySQLCollector: Skipping %s : %s", vars_suffix, row['Value'] )
                       ## if we couldn't convert to float, skip it.
                       pass
-            except:
-                self.log.error('MySQLCollector: Couldnt get global variables')
+            except Exception, vars_error:
+                self.log.error("MySQLCollector: Couldnt get global variables: %s", vars_error)
                 pass
 
         if self.config['master']:
@@ -442,6 +442,66 @@ class MySQLCollector(diamond.collector.Collector):
             subkey = "Innodb_status_process_time"
             metrics['innodb'][subkey] = Innodb_status_process_time
 
+        if self.config['extras']:
+            # Build any extra stats here
+            metrics['extras'] = {}
+            try:
+              ## salvaged from a early 2012 version of this collector
+              # http://themattreid.com/wordpress/2009/04/28/a-quick-rundown-of-per-thread-buffers/
+              # http://web.archive.org/web/20150512062557/http://themattreid.com/wordpress/2009/04/28/a-quick-rundown-of-per-thread-buffers/
+              metrics['extras']['Connection_max_memory_per'] = metrics['variables']['read_buffer_size']     \
+                                                   + metrics['variables']['read_rnd_buffer_size'] \
+                                                   + metrics['variables']['sort_buffer_size']     \
+                                                   + metrics['variables']['thread_stack']         \
+                                                   + metrics['variables']['join_buffer_size']     \
+                                                   + metrics['variables']['binlog_cache_size']
+
+
+
+              metrics['extras']['Connection_max_connections'] = metrics['variables']['max_connections']
+
+              metrics['extras']['Connection_max_memory'] = float(metrics['extras']['Connection_max_memory_per'] * metrics['variables']['max_connections'])
+
+              if metrics['status']['Connections'] > 1:
+                  metrics['extras']['Connection_thread_cache_miss_rate'] = float(metrics['status']['Threads_created'] / metrics['status']['Connections'])
+              else:
+                  #dont leave this unpublished!
+                  metrics['extras']['Connection_thread_cache_miss_rate'] = 0
+
+              metrics['extras']['Innodb_buffer_pool_total_size'] = float(metrics['variables']['innodb_buffer_pool_size']         \
+                                                       + metrics['variables']['innodb_additional_mem_pool_size'] \
+                                                       + metrics['variables']['innodb_log_buffer_size']          \
+                                                       + metrics['variables']['key_buffer_size']                 \
+                                                       + metrics['variables']['query_cache_size']
+                                                       )
+              ### key_blocks == key_buffer blocks so block size.
+              metrics['extras']['Key_blocks_unused_bytes'] = float(metrics['status']['Key_blocks_unused'] * metrics['variables']['key_cache_block_size'] )
+
+              metrics['extras']['Key_blocks_used_bytes'] = float(metrics['status']['Key_blocks_used'] * metrics['variables']['key_cache_block_size'])
+
+
+              ## this may never actually collect these metrics
+              ## but I dont have an sql that returns them to test against
+              # # calculate the number of unpurged txns from existing variables
+              ## borrowed from https://github.com/matejzero/grafana-dashboards/blob/master/mysql/collectd-mysql.py
+              # Innodb_unpurged_txns
+              if 'Innodb_max_trx_id' in metrics['innodb']:
+                  metrics['extras']['Innodb_unpurged_txns'] = float(metrics['innodb']['Innodb_max_trx_id']) - float(metrics['innodb']['Innodb_purge_trx_id'])
+              # # Innodb_uncheckpointed_bytes
+              if 'Innodb_lsn_last_checkpoint' in metrics['innodb']:
+                  metrics['extras']['Innodb_uncheckpointed_bytes'] = float(metrics['innodb']['Innodb_lsn_current'])- float(metrics['innodb']['Innodb_lsn_last_checkpoint'])
+              # # Innodb_unflushed_log
+              if 'Innodb_lsn_flushed' in metrics['innodb']:
+                  metrics['extras']['Innodb_unflushed_log'] = float(metrics['innodb']['Innodb_lsn_current']) - float(metrics['innodb']['Innodb_lsn_flushed'])
+
+            except Exception, extras_error:
+                self.log.error("MySQLCollector: Extras failed: %s", extras_error )
+                pass
+
+
+
+
+
         self.disconnect()
 
         return metrics
@@ -455,10 +515,17 @@ class MySQLCollector(diamond.collector.Collector):
                 if type(metric_value) is not float:
                     continue
 
-## sighfuckreally?   and this uses a direct metricname too.  so can we append to the guage keys list programatically?
                 if metric_name not in self._GAUGE_KEYS:
+                  ## all extras and variables are gauges, so dont derive them.
+                  if key != "extras" and key != "variables":
+                    # self.log.debug("derive: %s : %s", key, metric_name)
                     metric_value = self.derivative(nickname + metric_name,
                                                    metric_value)
+                # if key == "extras":
+                #   self.log.debug("extra publish: %s : %s", nickname + metric_name, metric_value)
+
+                # self.log.debug("publish: %s : %s", nickname + metric_name, metric_value)
+
                 if key == 'status':
                     if (('publish' not in self.config or
                          metric_name in self.config['publish'])):
