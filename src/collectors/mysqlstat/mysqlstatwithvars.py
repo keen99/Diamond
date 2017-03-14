@@ -102,6 +102,7 @@ class MySQLCollector(diamond.collector.Collector):
         'Innodb_trx_history_list_length', 'Innodb_trx_total_lock_structs',
         'Innodb_status_process_time',
         'Position',
+        'Uptime',
         ]
     _IGNORE_KEYS = [
         'Master_Port', 'Master_Server_Id',
@@ -249,7 +250,7 @@ class MySQLCollector(diamond.collector.Collector):
             self.config['hosts'].append(hoststr)
 
         # Normalize some config vars
-        self.config['global_variables'] = str_to_bool(self.config['global_variables'])
+        self.config['variables'] = str_to_bool(self.config['variables'])
         self.config['extras'] = str_to_bool(self.config['extras'])
         self.config['master'] = str_to_bool(self.config['master'])
         self.config['slave'] = str_to_bool(self.config['slave'])
@@ -264,7 +265,7 @@ class MySQLCollector(diamond.collector.Collector):
                 "Which rows of '[SHOW GLOBAL STATUS](http://dev.mysql." +
                 "com/doc/refman/5.1/en/show-status.html)' you would " +
                 "like to publish. Leave unset to publish all",
-            'global_variables': 'Collect SHOW GLOBAL VARIABLES',
+            'variables': 'Collect SHOW GLOBAL VARIABLES',
             'slave': 'Collect SHOW SLAVE STATUS',
             'master': 'Collect SHOW MASTER STATUS',
             'innodb': 'Collect SHOW ENGINE INNODB STATUS',
@@ -289,7 +290,11 @@ class MySQLCollector(diamond.collector.Collector):
             # Leave unset to publish all
             # 'publish': '',
 
-            'global_variables':    True,
+            ## ship all metrics as gauges instead of doing derives internally
+            'all_gauges':    True,
+
+
+            'variables':    True,
             'extras':    True,
             'slave':    False,
             'master':   False,
@@ -322,7 +327,7 @@ class MySQLCollector(diamond.collector.Collector):
     def get_db_global_status(self):
         return self.get_db_stats('SHOW GLOBAL STATUS')
 
-    def get_db_global_variables(self):
+    def get_db_variables(self):
         return self.get_db_stats('SHOW GLOBAL VARIABLES')
 
     def get_db_master_status(self):
@@ -347,10 +352,10 @@ class MySQLCollector(diamond.collector.Collector):
             except:
                 pass
 
-        if self.config['global_variables']:
+        if self.config['variables']:
             metrics['variables'] = {}
             try:
-              rows = self.get_db_global_variables()
+              rows = self.get_db_variables()
               for row in rows:
                   try:
                       vars_suffix = row['Variable_name']
@@ -512,15 +517,21 @@ class MySQLCollector(diamond.collector.Collector):
             for metric_name in metrics[key]:
                 metric_value = metrics[key][metric_name]
 
-                if type(metric_value) is not float:
+                if (( type(metric_value) is not float and type(metric_value) is not int )):
+                    self.log.warn("skipping %s: %s : %s", type(metric_value), nickname + metric_name, metric_value)
                     continue
 
-                if metric_name not in self._GAUGE_KEYS:
-                  ## all extras and variables are gauges, so dont derive them.
-                  if key != "extras" and key != "variables":
-                    # self.log.debug("derive: %s : %s", key, metric_name)
-                    metric_value = self.derivative(nickname + metric_name,
-                                                   metric_value)
+
+                if (('all_gauges' not in self.config or
+                         not self.config['all_gauges'])):
+                  if metric_name not in self._GAUGE_KEYS:
+                    ## all extras and variables are gauges, so dont derive them.
+                    if key != "extras" and key != "variables":
+                      # self.log.debug("derive: %s : %s", key, metric_name)
+                      metric_value = self.derivative(nickname + metric_name,
+                                                     metric_value)
+                      self.log.debug("derived: %s : %s", nickname + metric_name, metric_value)
+
                 # if key == "extras":
                 #   self.log.debug("extra publish: %s : %s", nickname + metric_name, metric_value)
 
